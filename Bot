@@ -1,0 +1,122 @@
+import os
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import quote
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Конфигурация
+TOKEN = os.getenv('7461396222:AAGWKUKQdFx4ztKhn0ukz8PqDb-OS9UxYbw')
+IPLOGGER_URL = "https://iplogger.org/logger/"
+USER_STATS = {}  # {user_id: {'links': [], 'stats': {}}}
+
+async def start(update: Update, context: CallbackContext) -> None:
+    """Обработчик команды /start"""
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Привет, {user.first_name}!\n\n"
+        "Отправь мне любую ссылку, и я создам короткую отслеживаемую ссылку. "
+        "Когда кто-то перейдет по ней, я пришлю тебе информацию об этом.\n\n"
+        "Используй /stats чтобы посмотреть статистику по вашим ссылкам."
+    )
+
+async def handle_message(update: Update, context: CallbackContext) -> None:
+    """Обработчик текстовых сообщений с ссылками"""
+    text = update.message.text
+    user_id = update.effective_user.id
+    
+    if not (text.startswith('http://') or text.startswith('https://')):
+        await update.message.reply_text("Пожалуйста, отправьте корректную ссылку (начинающуюся с http:// или https://)")
+        return
+    
+    try:
+        # Создаем ссылку для IPLogger
+        encoded_url = quote(text, safe='')
+        payload = {
+            'url': encoded_url,
+            'do': '1'
+        }
+        
+        # Отправляем запрос к IPLogger
+        session = requests.Session()
+        response = session.post(IPLOGGER_URL, data=payload)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Извлекаем короткую ссылку
+        short_link = soup.find('input', {'id': 'download_url'})['value']
+        stats_link = soup.find('input', {'id': 'stat_url'})['value']
+        
+        # Сохраняем информацию о ссылке
+        if user_id not in USER_STATS:
+            USER_STATS[user_id] = {'links': [], 'stats': {}}
+        
+        link_id = f"link_{len(USER_STATS[user_id]['links']) + 1}"
+        USER_STATS[user_id]['links'].append({
+            'id': link_id,
+            'original': text,
+            'short': short_link,
+            'stats': stats_link
+        })
+        USER_STATS[user_id]['stats'][link_id] = 0
+        
+        # Отправляем пользователю результат
+        keyboard = [
+            [InlineKeyboardButton("Статистика", url=stats_link)],
+            [InlineKeyboardButton("Поделиться", switch_inline_query=short_link)]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"✅ Готово! Вот ваша ссылка:\n\n{short_link}\n\n"
+            f"Когда кто-то перейдет по ней, вы получите уведомление.",
+            reply_markup=reply_markup
+        )
+        
+    except Exception as e:
+        logger.error(f"Error creating short link: {e}")
+        await update.message.reply_text("Произошла ошибка при создании ссылки. Попробуйте позже.")
+
+async def show_stats(update: Update, context: CallbackContext) -> None:
+    """Показывает статистику по ссылкам пользователя"""
+    user_id = update.effective_user.id
+    
+    if user_id not in USER_STATS or not USER_STATS[user_id]['links']:
+        await update.message.reply_text("У вас пока нет созданных ссылок.")
+        return
+    
+    stats_text = "📊 Ваша статистика:\n\n"
+    for link in USER_STATS[user_id]['links']:
+        stats_text += (
+            f"🔗 Оригинальная ссылка: {link['original']}\n"
+            f"📎 Короткая ссылка: {link['short']}\n"
+            f"👀 Переходов: {USER_STATS[user_id]['stats'].get(link['id'], 0)}\n"
+            f"📈 Статистика: {link['stats']}\n\n"
+        )
+    
+    await update.message.reply_text(stats_text)
+
+def main() -> None:
+    """Запуск бота"""
+    # Создаем Application
+    application = Application.builder().token(TOKEN).build()
+    
+    # Регистрируем обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stats", show_stats))
+    
+    # Регистрируем обработчик текстовых сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Запускаем бота
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
